@@ -1,5 +1,5 @@
 # generated: 2026-03-22
-# last_updated: 2026-03-22
+# last_updated: 2026-03-23
 # project: mqtt-smart-clock
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-03-22
-last_updated: 2026-03-22
+last_updated: 2026-03-23
 project: mqtt-smart-clock
 project_key: NOKEY
 tracking_system: file-system
@@ -44,8 +44,8 @@ story_location: _bmad-output/implementation-artifacts
 development_status:
 
   # ─── Epic 1: Connected Clock Foundation ───────────────────────────────────
-  epic-1: backlog
-  1-1-project-scaffolding-and-build-system: backlog
+  epic-1: in-progress
+  1-1-project-scaffolding-and-build-system: done
   1-2-clock-face-display: backlog
   1-3-wi-fi-and-mqtt-connectivity: backlog
   1-4-ntp-time-sync: backlog
