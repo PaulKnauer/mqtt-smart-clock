@@ -342,6 +342,7 @@ void NetworkManager::syncNtp() {
 
   time_t nowTime = time(nullptr);
   if (nowTime > kMinNtpEpoch) {
+    ntpSynced = true;
     ntpSynced_ = true;
     struct tm timeinfo;
     localtime_r(&nowTime, &timeinfo);

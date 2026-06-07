@@ -1,42 +1,80 @@
+// Smart Clock Firmware — main entry point
+//
+// FreeRTOS dual-core layout:
+//   Core 0 (pro): NetworkTask @ priority 1 — WiFi, MQTT, NTP, event publishing
+//   Core 1 (app): DisplayTask @ priority 5 — TFT, touch, audio, alarm evaluation
+//
+// Queues:
+//   commandQueue (8 slots) — NetworkTask → DisplayTask (commands from MQTT)
+//   eventQueue   (16 slots) — DisplayTask → NetworkTask (events to publish)
+
 #include <Arduino.h>
 #include "queue_handles.h"
-#include "display_task.h"
-#include "network_task.h"
 
-// Queue handles — defined here, extern-declared in queue_handles.h (AR1).
-QueueHandle_t commandQueue;  // NetworkTask → DisplayTask, capacity 8
-QueueHandle_t eventQueue;    // DisplayTask → NetworkTask, capacity 16
+// ── Queue handles (defined here, extern in queue_handles.h) ───────────────
+
+QueueHandle_t commandQueue = nullptr;
+QueueHandle_t eventQueue   = nullptr;
+
+volatile bool ntpSynced   = false;
+volatile bool systemFault = false;
+
+// ── Task declarations ─────────────────────────────────────────────────────
+
+void networkTaskEntry(void* pvParameters);
+void displayTaskEntry(void* pvParameters);
+
+// ── Main ──────────────────────────────────────────────────────────────────
 
 void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println();
+  Serial.println("[boot] Smart Clock Firmware v0.1.0");
+
+  // Create inter-task queues
   commandQueue = xQueueCreate(8, sizeof(CommandMessage));
   eventQueue   = xQueueCreate(16, sizeof(EventMessage));
 
-  // DisplayTask on Core 1 (app core), priority 5 (high).
-  // Owns: TFT, display state machine, touch, alarm evaluation, audio, RGB LED (AR5, AR6).
-  xTaskCreatePinnedToCore(
-    displayTaskEntry,  // task function
-    "DisplayTask",     // task name
-    8192,              // stack size in bytes
-    nullptr,           // task parameter
-    5,                 // priority (high)
-    nullptr,           // task handle (not needed)
-    1                  // core 1
+  if (!commandQueue || !eventQueue) {
+    Serial.println("[boot] FATAL: Failed to create queues — halting");
+    systemFault = true;
+    return;
+  }
+
+  // NetworkTask on Core 0 (pro) — handles all I/O
+  BaseType_t netOk = xTaskCreatePinnedToCore(
+    networkTaskEntry,
+    "NetworkTask",
+    8192,   // stack depth
+    nullptr,// params
+    1,      // priority (low — periodic polling)
+    nullptr,
+    0       // core 0
   );
 
-  // NetworkTask on Core 0 (proto core), priority 1 (normal).
-  // Owns: Wi-Fi, MQTT connect/reconnect/subscribe, NTP sync, inbound message parse (AR5, AR6).
-  xTaskCreatePinnedToCore(
-    networkTaskEntry,  // task function
-    "NetworkTask",     // task name
-    8192,              // stack size in bytes
-    nullptr,           // task parameter
-    1,                 // priority (normal)
-    nullptr,           // task handle (not needed)
-    0                  // core 0
+  // DisplayTask on Core 1 (app) — display, touch, audio, alarms
+  BaseType_t dispOk = xTaskCreatePinnedToCore(
+    displayTaskEntry,
+    "DisplayTask",
+    8192,   // stack depth
+    nullptr,
+    5,      // priority (high — responsive UI)
+    nullptr,
+    1       // core 1
   );
+
+  if (netOk != pdPASS || dispOk != pdPASS) {
+    Serial.println("[boot] FATAL: Task creation failed — halting");
+    systemFault = true;
+    return;
+  }
+
+  Serial.println("[boot] Tasks created, starting scheduler");
 }
 
-// FreeRTOS tasks own all work. The Arduino loop task is deleted immediately.
 void loop() {
+  // Arduino framework requires loop() even with FreeRTOS.
+  // Delete it so the idle task gets CPU.
   vTaskDelete(nullptr);
 }

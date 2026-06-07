@@ -1,15 +1,23 @@
 #pragma once
 
-// FreeRTOS queue handle declarations (firmware-only).
-// Include this header in firmware task files that call xQueueSend/xQueueReceive.
-// DO NOT include from native test files — it pulls in FreeRTOS headers.
+// /!\ Shared state between NetworkTask (Core 0) and DisplayTask (Core 1) /!\
 //
-// For native tests, include only queue_types.h (pure struct definitions).
+// Rules:
+// 1. NetworkTask WRITES to these flags; DisplayTask only READS.
+// 2. Writes are atomic on ESP32 (word-aligned single bytes).
+// 3. No mutex required — single-writer, single-reader.
 
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
-#include "queue_types.h"
+#include <Arduino.h>
+#include <queue_types.h>
 
-// Defined in main.cpp.
-extern QueueHandle_t commandQueue;  // NetworkTask → DisplayTask, capacity 8
-extern QueueHandle_t eventQueue;    // DisplayTask → NetworkTask, capacity 16
+// FreeRTOS queues for cross-task IPC
+extern QueueHandle_t commandQueue;
+extern QueueHandle_t eventQueue;
+
+// NTP sync status — written by NetworkTask, read by DisplayTask.
+// DisplayTask will NOT evaluate alarms until this is true.
+extern volatile bool ntpSynced;
+
+// Fail-safe mode flag — set when a critical error is detected.
+// Currently set by panic handler, read by DisplayTask.
+extern volatile bool systemFault;

@@ -103,10 +103,23 @@ void DisplayManager::begin() {
 void DisplayManager::loop() {
   processCommandQueue();
 
+  // Check for fail-safe mode (set by panic handler)
+  if (systemFault) {
+    tft_.fillScreen(TFT_RED);
+    tft_.setTextColor(TFT_WHITE, TFT_RED);
+    tft_.setFreeFont(&FreeSans12pt7b);
+    tft_.drawString("SYSTEM FAULT", 40, 100);
+    tft_.drawString("Rebooting...", 50, 140);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    return;
+  }
+
   time_t now = time(nullptr);
 
-  // Evaluate alarm
-  evaluateAlarm(now);
+  // Evaluate alarm — only after NTP sync to avoid false triggers
+  if (ntpSynced) {
+    evaluateAlarm(now);
+  }
 
   // Auto-stop alarm after timeout
   if (alarmRinging_ && (millis() - alarmStartMs_ >= kAlarmAutoStopMs)) {
