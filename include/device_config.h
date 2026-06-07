@@ -15,6 +15,10 @@ constexpr char kNtpServer[] = "pool.ntp.org";
 // MQTT topic root prefix.
 constexpr char kMqttTopicPrefix[] = "clocks";
 
+// Default backlight brightness level on boot (0-100).
+// Persisted across reboots via NVS in later stories.
+constexpr uint8_t kDefaultBrightness = 50;
+
 // UTC offset in hours for local time display.
 // Adjust for your timezone (e.g., -5 for EST, 1 for CET).
 constexpr int8_t kTimezoneOffsetHours = 0;

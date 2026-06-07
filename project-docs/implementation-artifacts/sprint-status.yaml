@@ -1,0 +1,48 @@
+stories:
+  - id: "1.1"
+    title: "Project Scaffolding And Build System"
+    status: "done"
+    epic: 1
+    dependencies: []
+  - id: "1.2"
+    title: "NetworkTask With WiFi, MQTT, And NTP"
+    status: "not-started"
+    epic: 1
+    dependencies: ["1.1"]
+  - id: "1.3"
+    title: "Clock Face Display"
+    status: "not-started"
+    epic: 1
+    dependencies: ["1.1"]
+  - id: "2.1"
+    title: "Display State Machine And Message Overlay"
+    status: "not-started"
+    epic: 2
+    dependencies: ["1.2", "1.3"]
+  - id: "2.2"
+    title: "Set Brightness Command"
+    status: "not-started"
+    epic: 2
+    dependencies: ["1.3"]
+  - id: "2.3"
+    title: "Set Alarm Command"
+    status: "not-started"
+    epic: 2
+    dependencies: ["1.3"]
+  - id: "2.4"
+    title: "Heartbeat And Event Publishing"
+    status: "not-started"
+    epic: 2
+    dependencies: ["1.2"]
+  - id: "3.1"
+    title: "Alarm Evaluation And Triggering"
+    status: "not-started"
+    epic: 3
+    dependencies: ["2.1", "2.2", "2.3", "2.4"]
+  - id: "3.2"
+    title: "Touch Dismiss And Snooze"
+    status: "not-started"
+    epic: 3
+    dependencies: ["3.1"]
+completed_epics: []
+current_epic: 1
