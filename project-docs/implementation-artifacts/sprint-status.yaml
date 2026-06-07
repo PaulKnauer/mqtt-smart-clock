@@ -26,7 +26,7 @@ stories:
     dependencies: ["1.3"]
   - id: "2.3"
     title: "Set Alarm Command"
-    status: "in-progress"
+    status: "done"
     epic: 2
     dependencies: ["1.3"]
   - id: "2.4"
@@ -36,13 +36,13 @@ stories:
     dependencies: ["1.2"]
   - id: "3.1"
     title: "Alarm Evaluation And Triggering"
-    status: "not-started"
+    status: "done"
     epic: 3
     dependencies: ["2.1", "2.2", "2.3", "2.4"]
   - id: "3.2"
     title: "Touch Dismiss And Snooze"
-    status: "not-started"
+    status: "done"
     epic: 3
     dependencies: ["3.1"]
-completed_epics: []
-current_epic: 2
+completed_epics: [1, 2, 3]
+current_epic: null

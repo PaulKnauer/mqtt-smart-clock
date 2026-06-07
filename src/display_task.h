@@ -2,23 +2,16 @@
 
 // DisplayTask: runs on Core 1 (app core), priority 5 (high).
 // Owns: TFT rendering, display state machine, touch polling, RGB LED, audio, alarm evaluation.
-//
-// Cross-task rules (AR6):
-// - NEVER call blocking network functions from DisplayTask
-// - NEVER access the tft instance from NetworkTask
-// - All inbound commands arrive via commandQueue
-// - All outbound events depart via eventQueue
 
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include "queue_handles.h"
 
-// Display mode priority order (highest to lowest)
 enum class DisplayMode {
-  kAlarmRinging,   // highest priority — alarm active
-  kMessage,        // transient message overlay
-  kClock,          // default idle state
-  kError           // connectivity/time lost
+  kAlarmRinging,
+  kMessage,
+  kClock,
+  kError
 };
 
 class DisplayManager {
@@ -31,42 +24,43 @@ public:
 
 private:
   TFT_eSPI tft_;
+  XPT2046_Touchscreen touch_;
 
-  // Display state
   DisplayMode currentMode_;
   DisplayMode previousMode_;
 
-  // Message overlay
   char overlayMessage_[160];
   unsigned long overlayStartMs_;
   unsigned long overlayDurationMs_;
 
-  // Brightness
   uint8_t brightnessLevel_;
   void setupBacklight();
   void setBacklight(uint8_t level);
   void persistBrightness(uint8_t level);
   uint8_t loadBrightness();
+  void initNvs();
 
-  // Clock face
   void renderClockFace();
-  void renderMessageOverlay();
+  void showMessage(const char* msg, unsigned long durationMs);
   void renderAlarmRinging();
-  int lastMinute_;  // only redraw when minute changes
+  int lastMinute_;
 
-  // Command processing
   void processCommandQueue();
-  void handleSetBrightness(const CommandMessage& cmd);
-  void handleDisplayMessage(const CommandMessage& cmd);
-  void handleSetAlarm(const CommandMessage& cmd);
 
-  // Event helpers
+  // Alarm
+  time_t storedAlarmTime_;
+  char storedAlarmLabel_[64];
+  unsigned long alarmStartMs_;
+  bool alarmRinging_;
+  void saveAlarm(time_t alarmTime, const char* label);
+  void clearAlarm();
+  void loadAlarm();
+  void evaluateAlarm(time_t now);
+  void stopAlarm(const char* action);
+
   void sendCommandResult(const char* commandType, const char* status, const char* detail);
   void sendDisplayState();
   void sendAlarmState(bool armed);
-
-  // Preferences (NVS)
-  void initNvs();
   unsigned long millis() const;
 };
 
