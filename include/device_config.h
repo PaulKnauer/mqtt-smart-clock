@@ -20,8 +20,9 @@ constexpr char kMqttTopicPrefix[] = "clocks";
 constexpr uint8_t kDefaultBrightness = 50;
 
 // UTC offset in hours for local time display.
+// Default: +2 (SAST — South Africa / Cape Town).
 // Adjust for your timezone (e.g., -5 for EST, 1 for CET).
-constexpr int8_t kTimezoneOffsetHours = 0;
+constexpr int8_t kTimezoneOffsetHours = 2;
 
 // UTC offset in seconds (derived — do not change directly).
 constexpr long kTimezoneOffsetSeconds = static_cast<long>(kTimezoneOffsetHours) * 3600L;

@@ -1,67 +1,81 @@
 #pragma once
 
-// Inter-task message contract (AR1).
-// Defines CommandMessage (NetworkTask → DisplayTask) and EventMessage (DisplayTask → NetworkTask).
-// These types MUST be defined before either task is implemented — they are the inter-task API.
-// All cross-task data must transit these queues; no direct cross-task function calls (AR6).
-//
-// This header is intentionally FREE of FreeRTOS and Arduino dependencies so that
-// host-based unit tests (pio test -e native) can include it without a firmware toolchain.
-// Queue handle declarations live in queue_handles.h (firmware-only).
+#include <stdint.h>
+#include <stddef.h>  // for size_t
 
-#include <ctime>
-#include <cstdint>
+// ── Cross-task message types ─────────────────────────────────────────────────
+// Shared between NetworkTask (Core 0) and DisplayTask (Core 1).
+// All times stored as int64_t (Unix epoch seconds) for platform-independent size.
 
-// ── Command messages: NetworkTask → DisplayTask ────────────────────────────
-// commandQueue capacity: 8 messages
+// Commands sent *to* the display (from NetworkTask → DisplayTask).
 struct CommandMessage {
-  enum class Type { kSetAlarm, kDisplayMessage, kSetBrightness };
-  Type type;
+  enum class Type : uint8_t {
+    kSetAlarm,
+    kDisplayMessage,
+    kSetBrightness,
+  } type;
 
-  // Fields for kSetAlarm
-  char alarmLabel[64];    // alarm label string, null-terminated
-  time_t alarmTimeUtc;    // scheduled alarm time as Unix timestamp (UTC)
+  // Alarm command fields
+  int64_t alarmTimeUtc;    // Unix epoch seconds (int64_t for platform-independence)
+  char    alarmLabel[64];
 
-  // Fields for kDisplayMessage
-  char message[160];         // message text to display, null-terminated
-  uint32_t durationSeconds;  // how long to show the message before returning to clock
+  // Display command fields
+  char   message[128];
+  int32_t durationSeconds;
 
-  // Fields for kSetBrightness
-  uint8_t brightnessLevel;  // backlight level 0–100
+  // Brightness command fields
+  uint8_t brightnessLevel;
 };
+static_assert(sizeof(CommandMessage) <= 256,
+              "CommandMessage exceeds 256 bytes — increase queue item size or reduce fields");
 
-// ── Event messages: DisplayTask → NetworkTask ──────────────────────────────
-// eventQueue capacity: 16 messages
+// Events published *from* the display (DisplayTask → NetworkTask → MQTT).
 struct EventMessage {
-  enum class Type {
-    kAlarmTriggered,
-    kAlarmAcknowledged,
-    kCommandResult,
-    kDisplayState,
-    kAlarmState
+  enum class Type : uint8_t {
+    kHeartbeat,          // 30-second periodic telemetry
+    kCommandResult,      // Result of processing a command
+    kAlarmTriggered,     // Alarm started ringing
+    kAlarmAcknowledged,  // Alarm dismissed/snoozed/timeout
+    kDisplayState,       // Current display mode + brightness (retained)
+    kAlarmState,         // Alarm armed/disarmed (retained)
+  } type;
+
+  union {
+    // kHeartbeat
+    struct {
+      uint32_t uptimeSeconds;
+      int16_t  wifiRssi;
+      bool     mqttConnected;
+      bool     ntpSynced;
+    } heartbeat;
+
+    // kCommandResult
+    struct {
+      char commandType[32];
+      char status[16];
+      char detail[64];
+    } commandResult;
+
+    // kAlarmTriggered / kAlarmState
+    struct {
+      int64_t alarmTimeUtc;
+      char    alarmLabel[64];
+    } alarm;
+
+    // kAlarmAcknowledged
+    struct {
+      char action[16];  // "dismiss", "snooze", "timeout"
+      char source[16];  // "timer", "touch"
+      int16_t snoozeMinutes;
+    } acknowledge;
+
+    // kDisplayState
+    struct {
+      uint8_t brightness;
+      char    displayMode[16];
+      bool    alarmArmed;  // Also used by kAlarmState
+    } state;
   };
-  Type type;
-
-  // Fields for kAlarmTriggered / kAlarmAcknowledged
-  time_t alarmTimeUtc;  // scheduled alarm time
-  char alarmLabel[64];  // alarm label
-  char action[16];      // e.g. "dismiss" or "snooze"
-  char source[16];      // e.g. "touch"
-
-  // Fields for kCommandResult
-  char commandType[32];  // e.g. "set_alarm", "display_message", "set_brightness"
-  char status[16];       // "received" | "applied" | "rejected" | "failed"
-  char detail[64];       // optional detail, e.g. "device_id_mismatch", "json_parse_error"
-
-  // Fields for kDisplayState
-  char displayMode[32];  // e.g. "clock", "message", "alarm_ringing", "error"
-  uint8_t brightness;    // current backlight level 0–100
-
-  // Fields for kAlarmState
-  bool alarmArmed;       // true if alarm is scheduled and not yet triggered
 };
-
-
-// Queue handle declarations are in queue_handles.h (firmware-only, includes FreeRTOS).
-// Firmware task files that call xQueueSend/xQueueReceive should include queue_handles.h.
-// Native test files include only this header.
+static_assert(sizeof(EventMessage) <= 256,
+              "EventMessage exceeds 256 bytes — increase queue item size or reduce fields");

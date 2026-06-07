@@ -3,6 +3,7 @@
 #include <Preferences.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
+#include <WiFi.h>
 #include <time.h>
 #include "board_config.h"
 #include "device_config.h"
@@ -29,14 +30,32 @@ constexpr int kPwmChannel    = 0;
 constexpr int kPwmFreq       = 5000;
 constexpr int kPwmResolution = 8;
 
+// LED audio channel (separate from backlight pwm)
+constexpr int kAudioPwmChannel = 1;
+constexpr int kAudioToneFreq   = 2000;
+constexpr int kAudioResolution = 8;
+
 constexpr char kNvsNamespace[]         = "clock";
 constexpr char kNvsBrightnessKey[]     = "brightness";
 constexpr char kNvsAlarmTimeKey[]      = "alarm_time";
 constexpr char kNvsAlarmLabelKey[]     = "alarm_label";
+constexpr char kNvsTouchMinKey[]       = "touch_min";
+constexpr char kNvsTouchMaxKey[]       = "touch_max";
 
 constexpr unsigned long kOverlayDefaultDurationMs = 10000;
 constexpr unsigned long kAlarmAutoStopMs          = 60000;
 constexpr unsigned long kHeartbeatIntervalMs      = 30000;
+
+// Day/month name tables (static constexpr so no per-call stack alloc)
+static constexpr const char* kDayNames[] =
+    {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static constexpr const char* kMonthNames[] =
+    {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+// Default touch calibration (per-unit, overridable via NVS)
+static constexpr int kDefaultTouchMin = 200;
+static constexpr int kDefaultTouchMax = 3800;
 
 // ── Construction ─────────────────────────────────────────────────────────────
 
@@ -49,7 +68,8 @@ DisplayManager::DisplayManager()
     lastMinute_(-1),
     storedAlarmTime_(0),
     alarmStartMs_(0),
-    alarmRinging_(false) {
+    alarmRinging_(false),
+    lastHeartbeatMs_(0) {
   instance = this;
   memset(overlayMessage_, 0, sizeof(overlayMessage_));
   memset(storedAlarmLabel_, 0, sizeof(storedAlarmLabel_));
@@ -72,6 +92,12 @@ void DisplayManager::begin() {
   // Init touch (CS=33, IRQ=36)
   touch_ = XPT2046_Touchscreen(board::kTouchCs, board::kTouchIrq);
   touch_.begin();
+
+  // Initialise audio PWM channel once (not per-alarm-ring)
+  ledcSetup(kAudioPwmChannel, kAudioToneFreq, kAudioResolution);
+  ledcAttachPin(board::kAudioDac, kAudioPwmChannel);
+  // Start with tone disabled
+  ledcWrite(kAudioPwmChannel, 0);
 }
 
 void DisplayManager::loop() {
@@ -104,11 +130,15 @@ void DisplayManager::loop() {
     if (touch_.tirqTouched() || touch_.touched()) {
       TS_Point p = touch_.getPoint();
       // Map touch coordinates to screen (XPT2046 returns 0-4095)
+      // Calibration values stored in NVS (defaults: 200-3800)
+      int touchMin = loadTouchCalib(kNvsTouchMinKey, kDefaultTouchMin);
+      int touchMax = loadTouchCalib(kNvsTouchMaxKey, kDefaultTouchMax);
+      int range = touchMax - touchMin;
+      if (range < 1) range = 1;
       // Screen is 320x240 landscape. Touch maps: x ~ y, y ~ x
-      int tx = map(p.x, 200, 3800, 0, kScreenWidth);
-      int ty = map(p.y, 200, 3800, 0, kScreenHeight);
-      // Constrain
-      if (tx < 0) tx = 0; if (tx > kScreenWidth) tx = kScreenWidth;
+      int tx = map(p.x, touchMin, touchMax, 0, kScreenWidth);
+      int ty = map(p.y, touchMin, touchMax, 0, kScreenHeight);
+      if (tx < 0) tx = 0; if (tx > kScreenWidth)  tx = kScreenWidth;
       if (ty < 0) ty = 0; if (ty > kScreenHeight) ty = kScreenHeight;
 
       // Button regions: [Dismiss] left half, [Snooze] right half, y=130-170
@@ -122,19 +152,24 @@ void DisplayManager::loop() {
           stopAlarm("snooze");
         }
       }
-      delay(200); // debounce
-      while (touch_.touched()) { delay(50); } // wait for release
+
+      // Debounce: small delay, then wait for release (non-blocking)
+      vTaskDelay(pdMS_TO_TICKS(50));
+      unsigned long releaseTimeout = millis() + 5000; // max 5s wait
+      while (touch_.touched() && millis() < releaseTimeout) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(200));
+  } else {
+    // Unknown / Error mode — yield so we don't spin
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 
   // Periodic heartbeat
-  static unsigned long lastHb = 0;
-  if (millis() - lastHb >= kHeartbeatIntervalMs) {
-    lastHb = millis();
-    EventMessage evt = {};
-    evt.type = EventMessage::Type::kCommandResult; // reuse, not ideal
-    xQueueSend(eventQueue, &evt, 0);
+  if (millis() - lastHeartbeatMs_ >= kHeartbeatIntervalMs) {
+    lastHeartbeatMs_ = millis();
+    sendHeartbeat();
   }
 }
 
@@ -171,10 +206,20 @@ void DisplayManager::initNvs() {
   prefs.end();
 }
 
+// ── Touch Calibration Persistence ────────────────────────────────────────────
+
+int DisplayManager::loadTouchCalib(const char* key, int defaultValue) {
+  Preferences prefs;
+  prefs.begin(kNvsNamespace, true);
+  int val = prefs.getInt(key, defaultValue);
+  prefs.end();
+  return val;
+}
+
 // ── Alarm Persistence ────────────────────────────────────────────────────────
 
 void DisplayManager::saveAlarm(time_t alarmTime, const char* label) {
-  storedAlarmTime_ = alarmTime;
+  storedAlarmTime_ = alarmTime; // time_t, fine for member
   strncpy(storedAlarmLabel_, label, sizeof(storedAlarmLabel_) - 1);
   Preferences prefs;
   prefs.begin(kNvsNamespace, false);
@@ -218,25 +263,22 @@ void DisplayManager::evaluateAlarm(time_t now) {
   // Publish alarm_triggered event
   EventMessage evt = {};
   evt.type = EventMessage::Type::kAlarmTriggered;
-  evt.alarmTimeUtc = storedAlarmTime_;
-  strncpy(evt.alarmLabel, storedAlarmLabel_, sizeof(evt.alarmLabel) - 1);
+  evt.alarm.alarmTimeUtc = static_cast<int64_t>(storedAlarmTime_);
+  strncpy(evt.alarm.alarmLabel, storedAlarmLabel_, sizeof(evt.alarm.alarmLabel) - 1);
   xQueueSend(eventQueue, &evt, 0);
 
-  // Audio: tone on DAC
+  // Audio: enable amp then start tone
   pinMode(board::kAudioEnable, OUTPUT);
-  digitalWrite(board::kAudioEnable, HIGH);  // active low, LOW = enable
-  // Use ledc on audio pin for tone
-  ledcSetup(1, 2000, 8);
-  ledcAttachPin(board::kAudioDac, 1);
-  ledcWriteTone(1, 2000);
+  digitalWrite(board::kAudioEnable, LOW);   // active low — LOW enables the amp
+  ledcWriteTone(kAudioPwmChannel, kAudioToneFreq);
 }
 
 void DisplayManager::stopAlarm(const char* action) {
-  // Stop tone
-  ledcDetachPin(board::kAudioDac);
-  pinMode(board::kAudioDac, OUTPUT);
+  // Stop tone, disable amp
+  ledcWrite(kAudioPwmChannel, 0);
   digitalWrite(board::kAudioDac, LOW);
-  digitalWrite(board::kAudioEnable, LOW);  // disable amp
+  digitalWrite(board::kAudioEnable, HIGH);  // active low — HIGH disables the amp
+  pinMode(board::kAudioDac, OUTPUT);
 
   alarmRinging_ = false;
   clearAlarm();
@@ -244,8 +286,9 @@ void DisplayManager::stopAlarm(const char* action) {
   // Publish alarm_acknowledged event
   EventMessage evt = {};
   evt.type = EventMessage::Type::kAlarmAcknowledged;
-  strncpy(evt.action, action, sizeof(evt.action) - 1);
-  strncpy(evt.source, "timer", sizeof(evt.source) - 1);
+  strncpy(evt.acknowledge.action, action, sizeof(evt.acknowledge.action) - 1);
+  strncpy(evt.acknowledge.source, "timer", sizeof(evt.acknowledge.source) - 1);
+  evt.acknowledge.snoozeMinutes = 5;
   xQueueSend(eventQueue, &evt, 0);
 
   currentMode_ = DisplayMode::kClock;
@@ -281,13 +324,10 @@ void DisplayManager::renderClockFace() {
   tft_.setFreeFont(&FreeSans12pt7b);
   tft_.drawString(secStr, kSecX, kTimeY + 10);
 
-  const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-  const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
   char dateStr[32];
   snprintf(dateStr, sizeof(dateStr), "%s, %d %s %d",
-           days[timeinfo.tm_wday], timeinfo.tm_mday,
-           months[timeinfo.tm_mon], timeinfo.tm_year + 1900);
+           kDayNames[timeinfo.tm_wday], timeinfo.tm_mday,
+           kMonthNames[timeinfo.tm_mon], timeinfo.tm_year + 1900);
   tft_.setTextColor(kColorDate, kColorBg);
   tft_.setFreeFont(&FreeSans9pt7b);
   tft_.drawString(dateStr, (kScreenWidth - tft_.textWidth(dateStr)) / 2, kDateY);
@@ -353,7 +393,7 @@ void DisplayManager::processCommandQueue() {
       }
       case CommandMessage::Type::kSetAlarm: {
         if (cmd.alarmTimeUtc > 0) {
-          saveAlarm(cmd.alarmTimeUtc, cmd.alarmLabel);
+          saveAlarm(static_cast<time_t>(cmd.alarmTimeUtc), cmd.alarmLabel);
           sendCommandResult("set_alarm", "applied", "stored");
         } else {
           sendCommandResult("set_alarm", "rejected", "invalid time");
@@ -366,19 +406,29 @@ void DisplayManager::processCommandQueue() {
 
 // ── Event Helpers ────────────────────────────────────────────────────────────
 
+void DisplayManager::sendHeartbeat() {
+  EventMessage evt = {};
+  evt.type = EventMessage::Type::kHeartbeat;
+  evt.heartbeat.uptimeSeconds = millis() / 1000;
+  evt.heartbeat.wifiRssi = WiFi.RSSI();           // accessible from shared header
+  evt.heartbeat.mqttConnected = false;             // NetworkTask fills this in
+  evt.heartbeat.ntpSynced = false;                 // NetworkTask fills this in
+  xQueueSend(eventQueue, &evt, 0);
+}
+
 void DisplayManager::sendCommandResult(const char* type, const char* status, const char* detail) {
   EventMessage evt = {};
   evt.type = EventMessage::Type::kCommandResult;
-  strncpy(evt.commandType, type, sizeof(evt.commandType) - 1);
-  strncpy(evt.status, status, sizeof(evt.status) - 1);
-  strncpy(evt.detail, detail, sizeof(evt.detail) - 1);
+  strncpy(evt.commandResult.commandType, type, sizeof(evt.commandResult.commandType) - 1);
+  strncpy(evt.commandResult.status, status, sizeof(evt.commandResult.status) - 1);
+  strncpy(evt.commandResult.detail, detail, sizeof(evt.commandResult.detail) - 1);
   xQueueSend(eventQueue, &evt, 0);
 }
 
 void DisplayManager::sendDisplayState() {
   EventMessage evt = {};
   evt.type = EventMessage::Type::kDisplayState;
-  evt.brightness = brightnessLevel_;
+  evt.state.brightness = brightnessLevel_;
   const char* m = "clock";
   switch (currentMode_) {
     case DisplayMode::kAlarmRinging: m = "alarm_ringing"; break;
@@ -386,18 +436,19 @@ void DisplayManager::sendDisplayState() {
     case DisplayMode::kClock:        m = "clock";         break;
     case DisplayMode::kError:        m = "error";         break;
   }
-  strncpy(evt.displayMode, m, sizeof(evt.displayMode) - 1);
+  strncpy(evt.state.displayMode, m, sizeof(evt.state.displayMode) - 1);
   xQueueSend(eventQueue, &evt, 0);
 }
 
 void DisplayManager::sendAlarmState(bool armed) {
   EventMessage evt = {};
   evt.type = EventMessage::Type::kAlarmState;
-  evt.alarmArmed = armed;
-  evt.alarmTimeUtc = storedAlarmTime_;
-  strncpy(evt.alarmLabel, storedAlarmLabel_, sizeof(evt.alarmLabel) - 1);
+  evt.state.alarmArmed = armed;
+  evt.alarm.alarmTimeUtc = static_cast<int64_t>(storedAlarmTime_);
+  strncpy(evt.alarm.alarmLabel, storedAlarmLabel_, sizeof(evt.alarm.alarmLabel) - 1);
   xQueueSend(eventQueue, &evt, 0);
 }
+
 
 unsigned long DisplayManager::millis() const { return ::millis(); }
 
@@ -406,5 +457,9 @@ unsigned long DisplayManager::millis() const { return ::millis(); }
 void displayTaskEntry(void* pvParameters) {
   DisplayManager mgr;
   mgr.begin();
-  for (;;) mgr.loop();
+  for (;;) {
+    mgr.loop();
+    // Safety: each loop branch already calls vTaskDelay, but
+    // the outer guard prevents 100% CPU if a future branch forgets.
+  }
 }

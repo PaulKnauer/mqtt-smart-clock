@@ -2,7 +2,11 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <time.h>
-#include "credentials.h"
+#if __has_include("credentials.h")
+#  include "credentials.h"
+#else
+#  error "credentials.h not found. Copy credentials.h.example to credentials.h and fill in your WiFi/MQTT settings."
+#endif
 #include "device_config.h"
 #include "mqtt_topics.h"
 #include "queue_handles.h"
@@ -16,8 +20,12 @@ constexpr unsigned long kMqttRetryMs  = 5000;
 constexpr unsigned long kNtpRetryMs   = 30000;
 constexpr unsigned long kEventPollMs  = 100;
 constexpr int kNtpTimeoutSec          = 10;
-constexpr const char* kOfflinePayload = "offline";
-constexpr const char* kOnlinePayload  = "online";
+static constexpr const char* kOfflinePayload = "offline";
+static constexpr const char* kOnlinePayload  = "online";
+
+// Minimum epoch timestamp that indicates NTP has synced.
+// Anything before ~2024 (epoch 1704000000) is pre-NTP realtime-clock junk.
+static constexpr time_t kMinNtpEpoch = 1704000000;
 
 // ── Construction ─────────────────────────────────────────────────────────────
 
@@ -192,8 +200,8 @@ void NetworkManager::parseCommand(const char* topic, const char* jsonPayload) {
 
   // Build CommandMessage
   CommandMessage cmd;
-  cmd.type = CommandMessage::Type::kSetAlarm; // default, overridden below
-  memset(&cmd, 0, sizeof(cmd));               // zero all fields
+  memset(&cmd, 0, sizeof(cmd));               // zero ALL fields first
+  cmd.type = CommandMessage::Type::kSetAlarm; // then set type default
 
   if (strcmp(commandType, "set_alarm") == 0) {
     cmd.type = CommandMessage::Type::kSetAlarm;
@@ -206,7 +214,7 @@ void NetworkManager::parseCommand(const char* topic, const char* jsonPayload) {
       tm.tm_year -= 1900;
       tm.tm_mon  -= 1;
       tm.tm_sec  += device_config::kTimezoneOffsetSeconds; // apply TZ offset
-      cmd.alarmTimeUtc = mktime(&tm);
+      cmd.alarmTimeUtc = static_cast<int64_t>(mktime(&tm));
     }
     const char* label = doc["label"] | "";
     strncpy(cmd.alarmLabel, label, sizeof(cmd.alarmLabel) - 1);
@@ -230,6 +238,13 @@ void NetworkManager::parseCommand(const char* topic, const char* jsonPayload) {
 
   if (!pushCommand(cmd)) {
     Serial.println("[cmd] Command queue full, dropping message");
+    // Publish a command_result event so the server knows the command wasn't applied
+    EventMessage evt = {};
+    evt.type = EventMessage::Type::kCommandResult;
+    strncpy(evt.commandResult.commandType, commandType, sizeof(evt.commandResult.commandType) - 1);
+    strncpy(evt.commandResult.status, "dropped", sizeof(evt.commandResult.status) - 1);
+    strncpy(evt.commandResult.detail, "display queue full", sizeof(evt.commandResult.detail) - 1);
+    xQueueSend(eventQueue, &evt, 0);
   }
 }
 
@@ -254,38 +269,45 @@ void NetworkManager::publishEventToMqtt(const EventMessage& event) {
   uint8_t qos = 1;
 
   switch (event.type) {
+    case EventMessage::Type::kHeartbeat: {
+      doc["uptimeSeconds"] = event.heartbeat.uptimeSeconds;
+      doc["wifiRssi"]      = event.heartbeat.wifiRssi;
+      doc["mqttConnected"] = mqttClient_.connected();
+      doc["ntpSynced"]     = ntpSynced_;
+      mqtt_topics::eventHeartbeat(topic);
+      break;
+    }
     case EventMessage::Type::kAlarmTriggered: {
-      doc["time"]  = event.alarmTimeUtc;
-      doc["label"] = event.alarmLabel;
+      doc["time"]  = event.alarm.alarmTimeUtc;
+      doc["label"] = event.alarm.alarmLabel;
       mqtt_topics::eventAlarmTriggered(topic);
       break;
     }
     case EventMessage::Type::kAlarmAcknowledged: {
-      doc["time"]          = event.alarmTimeUtc;
-      doc["label"]         = event.alarmLabel;
-      doc["action"]        = event.action;
-      doc["snoozeMinutes"] = 5;
+      doc["action"]        = event.acknowledge.action;
+      doc["source"]        = event.acknowledge.source;
+      doc["snoozeMinutes"] = event.acknowledge.snoozeMinutes;
       mqtt_topics::eventAlarmAcknowledged(topic);
       break;
     }
     case EventMessage::Type::kCommandResult: {
-      doc["type"]   = event.commandType;
-      doc["result"] = event.status;
-      if (strlen(event.detail) > 0) {
-        doc["detail"] = event.detail;
+      doc["type"]   = event.commandResult.commandType;
+      doc["result"] = event.commandResult.status;
+      if (strlen(event.commandResult.detail) > 0) {
+        doc["detail"] = event.commandResult.detail;
       }
       mqtt_topics::eventCommandResult(topic);
       break;
     }
     case EventMessage::Type::kDisplayState: {
-      doc["mode"]       = event.displayMode;
-      doc["brightness"] = event.brightness;
+      doc["mode"]       = event.state.displayMode;
+      doc["brightness"] = event.state.brightness;
       mqtt_topics::stateDisplay(topic);
       retain = true;
       break;
     }
     case EventMessage::Type::kAlarmState: {
-      doc["armed"] = event.alarmArmed;
+      doc["armed"] = event.state.alarmArmed;
       mqtt_topics::stateAlarm(topic);
       retain = true;
       break;
@@ -319,7 +341,7 @@ void NetworkManager::syncNtp() {
   );
 
   time_t nowTime = time(nullptr);
-  if (nowTime > 100000) {
+  if (nowTime > kMinNtpEpoch) {
     ntpSynced_ = true;
     struct tm timeinfo;
     localtime_r(&nowTime, &timeinfo);
@@ -333,7 +355,9 @@ void NetworkManager::syncNtp() {
 // ── Low-level publish ────────────────────────────────────────────────────────
 
 bool NetworkManager::publishRaw(const char* topic, const char* payload, bool retained, uint8_t qos) {
-  (void)qos; // PubSubClient only supports QoS 0 for publish
+  // PubSubClient publish(const char*, const char*, bool) sends at QoS 0.
+  // For QoS 1 delivery, use the overload publish(const char*, const uint8_t*,
+  // unsigned int, bool) or accept QoS 0 for retained/status topics.
   if (!mqttClient_.connected()) return false;
   bool ok = mqttClient_.publish(topic, payload, retained);
   if (ok) {

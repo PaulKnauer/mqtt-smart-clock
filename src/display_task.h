@@ -58,9 +58,14 @@ private:
   void evaluateAlarm(time_t now);
   void stopAlarm(const char* action);
 
+  // Heartbeat
+  unsigned long lastHeartbeatMs_;
+
+  void sendHeartbeat();
   void sendCommandResult(const char* commandType, const char* status, const char* detail);
   void sendDisplayState();
   void sendAlarmState(bool armed);
+  int loadTouchCalib(const char* key, int defaultValue);
   unsigned long millis() const;
 };
 
