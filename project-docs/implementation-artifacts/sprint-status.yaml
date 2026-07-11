@@ -1,48 +1,50 @@
-stories:
-  - id: "1.1"
-    title: "Project Scaffolding And Build System"
-    status: "done"
-    epic: 1
-    dependencies: []
-  - id: "1.2"
-    title: "NetworkTask With WiFi, MQTT, And NTP"
-    status: "done"
-    epic: 1
-    dependencies: ["1.1"]
-  - id: "1.3"
-    title: "Clock Face Display"
-    status: "done"
-    epic: 1
-    dependencies: ["1.1"]
-  - id: "2.1"
-    title: "Display State Machine And Message Overlay"
-    status: "done"
-    epic: 2
-    dependencies: ["1.2", "1.3"]
-  - id: "2.2"
-    title: "Set Brightness Command"
-    status: "done"
-    epic: 2
-    dependencies: ["1.3"]
-  - id: "2.3"
-    title: "Set Alarm Command"
-    status: "done"
-    epic: 2
-    dependencies: ["1.3"]
-  - id: "2.4"
-    title: "Heartbeat And Event Publishing"
-    status: "done"
-    epic: 2
-    dependencies: ["1.2"]
-  - id: "3.1"
-    title: "Alarm Evaluation And Triggering"
-    status: "done"
-    epic: 3
-    dependencies: ["2.1", "2.2", "2.3", "2.4"]
-  - id: "3.2"
-    title: "Touch Dismiss And Snooze"
-    status: "done"
-    epic: 3
-    dependencies: ["3.1"]
-completed_epics: [1, 2, 3]
-current_epic: null
+# generated: 2026-06-07
+# last_updated: 2026-07-11
+# project: mqtt-smart-clock
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: project-docs/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+generated: 2026-06-07
+last_updated: 2026-07-11
+project: mqtt-smart-clock
+project_key: NOKEY
+tracking_system: file-system
+story_location: project-docs/implementation-artifacts
+
+development_status:
+  epic-1: done
+  1-1-project-scaffolding-and-build-system: done
+  1-2-network-task-wifi-mqtt-ntp: done
+  1-3-clock-face-display: done
+  epic-1-retrospective: optional
+
+  epic-2: done
+  2-1-display-state-machine-and-message-overlay: done
+  2-2-set-brightness-command: done
+  2-3-set-alarm-command: done
+  2-4-heartbeat-and-event-publishing: done
+  epic-2-retrospective: optional
+
+  epic-3: done
+  3-1-alarm-evaluation-and-triggering: done
+  3-2-touch-dismiss-and-snooze: done
+  epic-3-retrospective: optional
