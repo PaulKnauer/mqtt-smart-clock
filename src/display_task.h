@@ -5,6 +5,8 @@
 
 #include <Arduino.h>
 #include <TFT_eSPI.h>
+#include <XPT2046_Touchscreen.h>
+#include "alarm_stop_reason.h"
 #include "queue_handles.h"
 
 enum class DisplayMode {
@@ -25,6 +27,7 @@ public:
 private:
   TFT_eSPI tft_;
   XPT2046_Touchscreen touch_;
+  SPIClass touchSpi_;
 
   DisplayMode currentMode_;
   DisplayMode previousMode_;
@@ -44,6 +47,7 @@ private:
   void showMessage(const char* msg, unsigned long durationMs);
   void renderAlarmRinging();
   int lastMinute_;
+  int lastSecond_;
 
   void processCommandQueue();
 
@@ -56,7 +60,7 @@ private:
   void clearAlarm();
   void loadAlarm();
   void evaluateAlarm(time_t now);
-  void stopAlarm(const char* action);
+  void stopAlarm(AlarmStopReason reason);
 
   // Heartbeat
   unsigned long lastHeartbeatMs_;
@@ -65,7 +69,7 @@ private:
   void sendCommandResult(const char* commandType, const char* status, const char* detail);
   void sendDisplayState();
   void sendAlarmState(bool armed);
-  int loadTouchCalib(const char* key, int defaultValue);
+  bool handleAlarmTouch();
   unsigned long millis() const;
 };
 

@@ -1,8 +1,10 @@
 #include <unity.h>
 #include <string.h>
+#include "alarm_stop_reason.h"
 #include "queue_types.h"
 #include "device_config.h"
 #include "mqtt_topics.h"
+#include "mqtt_contract.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -32,6 +34,21 @@ void test_default_brightness_in_range() {
   TEST_ASSERT(device_config::kDefaultBrightness <= 100);
 }
 
+void test_presence_payload_matches_read_side_contract() {
+  char payload[128];
+  TEST_ASSERT_TRUE(mqtt_contract::buildPresencePayload(
+      payload, sizeof(payload), "clock-test", "online", 1893456000));
+  TEST_ASSERT_NOT_NULL(strstr(payload, "\"deviceId\":\"clock-test\""));
+  TEST_ASSERT_NOT_NULL(strstr(payload, "\"state\":\"online\""));
+  TEST_ASSERT_NOT_NULL(strstr(payload, "\"at\":\"2030-01-01T00:00:00Z\""));
+}
+
+void test_legacy_dropped_status_maps_to_failed() {
+  TEST_ASSERT_EQUAL_STRING("failed", mqtt_contract::canonicalCommandResultStatus("dropped"));
+  TEST_ASSERT_EQUAL_STRING("applied", mqtt_contract::canonicalCommandResultStatus("applied"));
+  TEST_ASSERT_EQUAL_STRING("failed", mqtt_contract::canonicalCommandResultStatus("unknown"));
+}
+
 // ── Queue struct sizes ───────────────────────────────────────────────────────
 
 void test_command_message_size() {
@@ -48,6 +65,24 @@ void test_event_message_union_member_sizes() {
   // Ensure no single event variant blows the union
   EventMessage evt;
   static_assert(sizeof(evt) <= 256, "EventMessage exceeds 256 bytes");
+}
+
+void test_alarm_stop_reason_metadata() {
+  TEST_ASSERT_EQUAL_STRING("dismiss", alarmStopAction(AlarmStopReason::kDismiss));
+  TEST_ASSERT_EQUAL_STRING("snooze", alarmStopAction(AlarmStopReason::kSnooze));
+  TEST_ASSERT_EQUAL_STRING("dismiss", alarmStopAction(AlarmStopReason::kTimeout));
+
+  TEST_ASSERT_EQUAL_STRING("button", alarmStopSource(AlarmStopReason::kDismiss));
+  TEST_ASSERT_EQUAL_STRING("button", alarmStopSource(AlarmStopReason::kSnooze));
+  TEST_ASSERT_EQUAL_STRING("timer", alarmStopSource(AlarmStopReason::kTimeout));
+
+  TEST_ASSERT_TRUE(alarmStopClearsAlarm(AlarmStopReason::kDismiss));
+  TEST_ASSERT_FALSE(alarmStopClearsAlarm(AlarmStopReason::kSnooze));
+  TEST_ASSERT_TRUE(alarmStopClearsAlarm(AlarmStopReason::kTimeout));
+
+  TEST_ASSERT_EQUAL_INT16(0, alarmStopSnoozeMinutes(AlarmStopReason::kDismiss));
+  TEST_ASSERT_EQUAL_INT16(5, alarmStopSnoozeMinutes(AlarmStopReason::kSnooze));
+  TEST_ASSERT_EQUAL_INT16(0, alarmStopSnoozeMinutes(AlarmStopReason::kTimeout));
 }
 
 // ── Topic building ───────────────────────────────────────────────────────────
@@ -179,10 +214,13 @@ int main(int argc, char** argv) {
   RUN_TEST(test_mqtt_prefix_is_defined);
   RUN_TEST(test_timezone_offset_is_valid);
   RUN_TEST(test_default_brightness_in_range);
+  RUN_TEST(test_presence_payload_matches_read_side_contract);
+  RUN_TEST(test_legacy_dropped_status_maps_to_failed);
 
   RUN_TEST(test_command_message_size);
   RUN_TEST(test_event_message_size);
   RUN_TEST(test_event_message_union_member_sizes);
+  RUN_TEST(test_alarm_stop_reason_metadata);
 
   RUN_TEST(test_command_subscribe_topic);
   RUN_TEST(test_event_heartbeat_topic);

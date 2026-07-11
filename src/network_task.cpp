@@ -8,6 +8,7 @@
 #  error "credentials.h not found. Copy credentials.h.example to credentials.h and fill in your WiFi/MQTT settings."
 #endif
 #include "device_config.h"
+#include "mqtt_contract.h"
 #include "mqtt_topics.h"
 #include "queue_handles.h"
 
@@ -20,8 +21,10 @@ constexpr unsigned long kMqttRetryMs  = 5000;
 constexpr unsigned long kNtpRetryMs   = 30000;
 constexpr unsigned long kEventPollMs  = 100;
 constexpr int kNtpTimeoutSec          = 10;
-static constexpr const char* kOfflinePayload = "offline";
-static constexpr const char* kOnlinePayload  = "online";
+constexpr uint16_t kMqttPacketBufferSize = 512;
+constexpr size_t kJsonBufferSize = 512;
+static constexpr const char* kOfflineState = "offline";
+static constexpr const char* kOnlineState  = "online";
 
 // Minimum epoch timestamp that indicates NTP has synced.
 // Anything before ~2024 (epoch 1704000000) is pre-NTP realtime-clock junk.
@@ -37,6 +40,7 @@ NetworkManager::NetworkManager()
     lastNtpAttemptMs_(0) {
   instance = this;
   mqttClient_.setServer(credentials::kMqttBrokerHost, credentials::kMqttPort);
+  mqttClient_.setBufferSize(kMqttPacketBufferSize);
   mqttClient_.setCallback(mqttCallbackStatic);
 }
 
@@ -97,8 +101,18 @@ void NetworkManager::ensureMqtt() {
   Serial.println(credentials::kMqttPort);
 
   // Build LWT topic
-  char lwtTopic[64];
+  char lwtTopic[mqtt_topics::kTopicBufferSize];
   mqtt_topics::statePresence(lwtTopic);
+  char offlinePayload[128];
+  if (!mqtt_contract::buildPresencePayload(
+        offlinePayload,
+        sizeof(offlinePayload),
+        device_config::kDeviceId,
+        kOfflineState,
+        time(nullptr))) {
+    Serial.println("[mqtt] Failed to build offline presence payload");
+    return;
+  }
 
   bool connected = false;
 
@@ -112,7 +126,7 @@ void NetworkManager::ensureMqtt() {
       lwtTopic,
       1,              // will QoS
       true,           // will retain
-      kOfflinePayload // will message
+      offlinePayload // will message
     );
   } else {
     connected = mqttClient_.connect(
@@ -120,7 +134,7 @@ void NetworkManager::ensureMqtt() {
       lwtTopic,
       1,
       true,
-      kOfflinePayload
+      offlinePayload
     );
   }
 
@@ -128,8 +142,16 @@ void NetworkManager::ensureMqtt() {
     Serial.println("[mqtt] Connected");
     subscribeToCommands();
 
-    // Publish online presence (retained)
-    publishRaw(lwtTopic, kOnlinePayload, true, 1);
+    // Publish online presence (retained) using the shared JSON state contract.
+    char onlinePayload[128];
+    if (mqtt_contract::buildPresencePayload(
+          onlinePayload,
+          sizeof(onlinePayload),
+          device_config::kDeviceId,
+          kOnlineState,
+          time(nullptr))) {
+      publishRaw(lwtTopic, onlinePayload, true, 1);
+    }
   } else {
     Serial.print("[mqtt] Connection failed, rc=");
     Serial.println(mqttClient_.state());
@@ -242,7 +264,7 @@ void NetworkManager::parseCommand(const char* topic, const char* jsonPayload) {
     EventMessage evt = {};
     evt.type = EventMessage::Type::kCommandResult;
     strncpy(evt.commandResult.commandType, commandType, sizeof(evt.commandResult.commandType) - 1);
-    strncpy(evt.commandResult.status, "dropped", sizeof(evt.commandResult.status) - 1);
+    strncpy(evt.commandResult.status, "failed", sizeof(evt.commandResult.status) - 1);
     strncpy(evt.commandResult.detail, "display queue full", sizeof(evt.commandResult.detail) - 1);
     xQueueSend(eventQueue, &evt, 0);
   }
@@ -256,6 +278,9 @@ bool NetworkManager::pushCommand(const CommandMessage& cmd) {
 // ── Event Queue Processing ───────────────────────────────────────────────────
 
 void NetworkManager::processEventQueue() {
+  // Device-originated observations require trustworthy wall-clock timestamps.
+  if (!ntpSynced_) return;
+
   EventMessage event;
   while (xQueueReceive(eventQueue, &event, 0) == pdTRUE) {
     publishEventToMqtt(event);
@@ -265,6 +290,12 @@ void NetworkManager::processEventQueue() {
 void NetworkManager::publishEventToMqtt(const EventMessage& event) {
   JsonDocument doc;
   char topic[128];
+  char observedAt[mqtt_contract::kTimestampSize];
+  if (!mqtt_contract::formatUtcTimestamp(time(nullptr), observedAt, sizeof(observedAt))) {
+    Serial.println("[mqtt] Failed to format event timestamp");
+    return;
+  }
+  doc["deviceId"] = device_config::kDeviceId;
   bool retain = false;
   uint8_t qos = 1;
 
@@ -274,12 +305,19 @@ void NetworkManager::publishEventToMqtt(const EventMessage& event) {
       doc["wifiRssi"]      = event.heartbeat.wifiRssi;
       doc["mqttConnected"] = mqttClient_.connected();
       doc["ntpSynced"]     = ntpSynced_;
+      doc["at"]            = observedAt;
       mqtt_topics::eventHeartbeat(topic);
       break;
     }
     case EventMessage::Type::kAlarmTriggered: {
-      doc["time"]  = event.alarm.alarmTimeUtc;
-      doc["label"] = event.alarm.alarmLabel;
+      char alarmTime[mqtt_contract::kTimestampSize];
+      if (!mqtt_contract::formatUtcTimestamp(
+            static_cast<time_t>(event.alarm.alarmTimeUtc),
+            alarmTime,
+            sizeof(alarmTime))) return;
+      doc["alarmTime"]   = alarmTime;
+      doc["label"]       = event.alarm.alarmLabel;
+      doc["triggeredAt"] = observedAt;
       mqtt_topics::eventAlarmTriggered(topic);
       break;
     }
@@ -287,12 +325,14 @@ void NetworkManager::publishEventToMqtt(const EventMessage& event) {
       doc["action"]        = event.acknowledge.action;
       doc["source"]        = event.acknowledge.source;
       doc["snoozeMinutes"] = event.acknowledge.snoozeMinutes;
+      doc["at"]            = observedAt;
       mqtt_topics::eventAlarmAcknowledged(topic);
       break;
     }
     case EventMessage::Type::kCommandResult: {
-      doc["type"]   = event.commandResult.commandType;
-      doc["result"] = event.commandResult.status;
+      doc["commandType"] = event.commandResult.commandType;
+      doc["status"] = mqtt_contract::canonicalCommandResultStatus(event.commandResult.status);
+      doc["at"] = observedAt;
       if (strlen(event.commandResult.detail) > 0) {
         doc["detail"] = event.commandResult.detail;
       }
@@ -302,12 +342,26 @@ void NetworkManager::publishEventToMqtt(const EventMessage& event) {
     case EventMessage::Type::kDisplayState: {
       doc["mode"]       = event.state.displayMode;
       doc["brightness"] = event.state.brightness;
+      doc["messageActive"] = strcmp(event.state.displayMode, "message") == 0;
+      doc["updatedAt"] = observedAt;
       mqtt_topics::stateDisplay(topic);
       retain = true;
       break;
     }
     case EventMessage::Type::kAlarmState: {
-      doc["armed"] = event.state.alarmArmed;
+      doc["enabled"] = event.alarmState.armed;
+      if (event.alarmState.armed && event.alarmState.alarmTimeUtc > 0) {
+        char alarmTime[mqtt_contract::kTimestampSize];
+        if (!mqtt_contract::formatUtcTimestamp(
+              static_cast<time_t>(event.alarmState.alarmTimeUtc),
+              alarmTime,
+              sizeof(alarmTime))) return;
+        doc["nextAlarmTime"] = alarmTime;
+      } else {
+        doc["nextAlarmTime"] = nullptr;
+      }
+      doc["label"] = event.alarmState.alarmLabel;
+      doc["updatedAt"] = observedAt;
       mqtt_topics::stateAlarm(topic);
       retain = true;
       break;
@@ -316,7 +370,11 @@ void NetworkManager::publishEventToMqtt(const EventMessage& event) {
       return;
   }
 
-  char jsonBuffer[256];
+  char jsonBuffer[kJsonBufferSize];
+  if (measureJson(doc) >= sizeof(jsonBuffer)) {
+    Serial.println("[mqtt] Event payload exceeds JSON buffer");
+    return;
+  }
   serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
   publishRaw(topic, jsonBuffer, retain, qos);
 }
@@ -344,6 +402,12 @@ void NetworkManager::syncNtp() {
   if (nowTime > kMinNtpEpoch) {
     ntpSynced = true;
     ntpSynced_ = true;
+    if (mqttClient_.connected()) {
+      // Reconnect so both retained online state and the registered LWT get a
+      // trustworthy timestamp instead of the provisional cold-boot epoch.
+      mqttClient_.disconnect();
+      lastMqttAttemptMs_ = 0;
+    }
     struct tm timeinfo;
     localtime_r(&nowTime, &timeinfo);
     Serial.print("[ntp] Time synced: ");

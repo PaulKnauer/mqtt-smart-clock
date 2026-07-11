@@ -56,7 +56,7 @@ struct EventMessage {
       char detail[64];
     } commandResult;
 
-    // kAlarmTriggered / kAlarmState
+    // kAlarmTriggered
     struct {
       int64_t alarmTimeUtc;
       char    alarmLabel[64];
@@ -69,11 +69,17 @@ struct EventMessage {
       int16_t snoozeMinutes;
     } acknowledge;
 
+    // kAlarmState
+    struct {
+      bool    armed;
+      int64_t alarmTimeUtc;
+      char    alarmLabel[64];
+    } alarmState;
+
     // kDisplayState
     struct {
       uint8_t brightness;
       char    displayMode[16];
-      bool    alarmArmed;  // Also used by kAlarmState
     } state;
   };
 };

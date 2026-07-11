@@ -18,6 +18,10 @@ constexpr int kTimeY   = 80;
 constexpr int kSecX    = 220;
 constexpr int kDateY   = 140;
 constexpr int kMsgY    = 100;
+constexpr int kSecondsBoxX = 223;
+constexpr int kSecondsBoxY = 65;
+constexpr int kSecondsBoxW = 64;
+constexpr int kSecondsBoxH = 42;
 
 constexpr uint16_t kColorBg       = TFT_BLACK;
 constexpr uint16_t kColorTime     = TFT_WHITE;
@@ -39,9 +43,6 @@ constexpr char kNvsNamespace[]         = "clock";
 constexpr char kNvsBrightnessKey[]     = "brightness";
 constexpr char kNvsAlarmTimeKey[]      = "alarm_time";
 constexpr char kNvsAlarmLabelKey[]     = "alarm_label";
-constexpr char kNvsTouchMinKey[]       = "touch_min";
-constexpr char kNvsTouchMaxKey[]       = "touch_max";
-
 constexpr unsigned long kOverlayDefaultDurationMs = 10000;
 constexpr unsigned long kAlarmAutoStopMs          = 60000;
 constexpr unsigned long kHeartbeatIntervalMs      = 30000;
@@ -53,19 +54,18 @@ static constexpr const char* kMonthNames[] =
     {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
-// Default touch calibration (per-unit, overridable via NVS)
-static constexpr int kDefaultTouchMin = 200;
-static constexpr int kDefaultTouchMax = 3800;
-
 // ── Construction ─────────────────────────────────────────────────────────────
 
 DisplayManager::DisplayManager()
-  : currentMode_(DisplayMode::kClock),
+  : touch_(board::kTouchCs, board::kTouchIrq),
+    touchSpi_(HSPI),
+    currentMode_(DisplayMode::kClock),
     previousMode_(DisplayMode::kClock),
     overlayStartMs_(0),
     overlayDurationMs_(0),
     brightnessLevel_(device_config::kDefaultBrightness),
     lastMinute_(-1),
+    lastSecond_(-1),
     storedAlarmTime_(0),
     alarmStartMs_(0),
     alarmRinging_(false),
@@ -89,9 +89,10 @@ void DisplayManager::begin() {
   // Load stored alarm
   loadAlarm();
 
-  // Init touch (CS=33, IRQ=36)
-  touch_ = XPT2046_Touchscreen(board::kTouchCs, board::kTouchIrq);
-  touch_.begin();
+  // The touch controller is wired to its own SPI pins on this board, not the TFT bus.
+  touchSpi_.begin(board::kTouchSclk, board::kTouchMiso, board::kTouchMosi, board::kTouchCs);
+  touch_.begin(touchSpi_);
+  touch_.setRotation(1);
 
   // Initialise audio PWM channel once (not per-alarm-ring)
   ledcSetup(kAudioPwmChannel, kAudioToneFreq, kAudioResolution);
@@ -123,7 +124,7 @@ void DisplayManager::loop() {
 
   // Auto-stop alarm after timeout
   if (alarmRinging_ && (millis() - alarmStartMs_ >= kAlarmAutoStopMs)) {
-    stopAlarm("timeout");
+    stopAlarm(AlarmStopReason::kTimeout);
   }
 
   if (currentMode_ == DisplayMode::kClock) {
@@ -134,45 +135,13 @@ void DisplayManager::loop() {
       currentMode_ = DisplayMode::kClock;
       tft_.fillScreen(kColorBg);
       lastMinute_ = -1;
+      lastSecond_ = -1;
+      sendDisplayState();
     }
     vTaskDelay(pdMS_TO_TICKS(200));
   } else if (currentMode_ == DisplayMode::kAlarmRinging) {
     renderAlarmRinging();
-
-    // Poll touch for dismiss/snooze
-    if (touch_.tirqTouched() || touch_.touched()) {
-      TS_Point p = touch_.getPoint();
-      // Map touch coordinates to screen (XPT2046 returns 0-4095)
-      // Calibration values stored in NVS (defaults: 200-3800)
-      int touchMin = loadTouchCalib(kNvsTouchMinKey, kDefaultTouchMin);
-      int touchMax = loadTouchCalib(kNvsTouchMaxKey, kDefaultTouchMax);
-      int range = touchMax - touchMin;
-      if (range < 1) range = 1;
-      // Screen is 320x240 landscape. Touch maps: x ~ y, y ~ x
-      int tx = map(p.x, touchMin, touchMax, 0, kScreenWidth);
-      int ty = map(p.y, touchMin, touchMax, 0, kScreenHeight);
-      if (tx < 0) tx = 0; if (tx > kScreenWidth)  tx = kScreenWidth;
-      if (ty < 0) ty = 0; if (ty > kScreenHeight) ty = kScreenHeight;
-
-      // Button regions: [Dismiss] left half, [Snooze] right half, y=130-170
-      if (ty >= 130 && ty <= 170) {
-        if (tx < kScreenWidth / 2) {
-          stopAlarm("dismiss");
-        } else {
-          // Snooze: re-arm for 5 minutes
-          time_t snoozeTime = time(nullptr) + 300; // +5 minutes
-          saveAlarm(snoozeTime, storedAlarmLabel_);
-          stopAlarm("snooze");
-        }
-      }
-
-      // Debounce: small delay, then wait for release (non-blocking)
-      vTaskDelay(pdMS_TO_TICKS(50));
-      unsigned long releaseTimeout = millis() + 5000; // max 5s wait
-      while (touch_.touched() && millis() < releaseTimeout) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
-    }
+    handleAlarmTouch();
     vTaskDelay(pdMS_TO_TICKS(200));
   } else {
     // Unknown / Error mode — yield so we don't spin
@@ -217,16 +186,6 @@ void DisplayManager::initNvs() {
   Preferences prefs;
   prefs.begin(kNvsNamespace, false);
   prefs.end();
-}
-
-// ── Touch Calibration Persistence ────────────────────────────────────────────
-
-int DisplayManager::loadTouchCalib(const char* key, int defaultValue) {
-  Preferences prefs;
-  prefs.begin(kNvsNamespace, true);
-  int val = prefs.getInt(key, defaultValue);
-  prefs.end();
-  return val;
 }
 
 // ── Alarm Persistence ────────────────────────────────────────────────────────
@@ -286,7 +245,7 @@ void DisplayManager::evaluateAlarm(time_t now) {
   ledcWriteTone(kAudioPwmChannel, kAudioToneFreq);
 }
 
-void DisplayManager::stopAlarm(const char* action) {
+void DisplayManager::stopAlarm(AlarmStopReason reason) {
   // Stop tone, disable amp
   ledcWrite(kAudioPwmChannel, 0);
   digitalWrite(board::kAudioDac, LOW);
@@ -294,19 +253,24 @@ void DisplayManager::stopAlarm(const char* action) {
   pinMode(board::kAudioDac, OUTPUT);
 
   alarmRinging_ = false;
-  clearAlarm();
+  if (alarmStopClearsAlarm(reason)) {
+    clearAlarm();
+  } else {
+    sendAlarmState(true);
+  }
 
   // Publish alarm_acknowledged event
   EventMessage evt = {};
   evt.type = EventMessage::Type::kAlarmAcknowledged;
-  strncpy(evt.acknowledge.action, action, sizeof(evt.acknowledge.action) - 1);
-  strncpy(evt.acknowledge.source, "timer", sizeof(evt.acknowledge.source) - 1);
-  evt.acknowledge.snoozeMinutes = 5;
+  strncpy(evt.acknowledge.action, alarmStopAction(reason), sizeof(evt.acknowledge.action) - 1);
+  strncpy(evt.acknowledge.source, alarmStopSource(reason), sizeof(evt.acknowledge.source) - 1);
+  evt.acknowledge.snoozeMinutes = alarmStopSnoozeMinutes(reason);
   xQueueSend(eventQueue, &evt, 0);
 
   currentMode_ = DisplayMode::kClock;
   tft_.fillScreen(kColorBg);
   lastMinute_ = -1;
+  lastSecond_ = -1;
 }
 
 // ── Clock Face ───────────────────────────────────────────────────────────────
@@ -318,32 +282,37 @@ void DisplayManager::renderClockFace() {
   struct tm timeinfo;
   if (!localtime_r(&now, &timeinfo)) return;
 
+  int currentSecond = static_cast<int>(now);
+  if (currentSecond == lastSecond_) return;
+  lastSecond_ = currentSecond;
+
   int currentMinute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
-  if (currentMinute == lastMinute_) return;
-  lastMinute_ = currentMinute;
+  if (currentMinute != lastMinute_) {
+    lastMinute_ = currentMinute;
+    tft_.fillScreen(kColorBg);
 
-  tft_.fillScreen(kColorBg);
+    char timeStr[6];
+    snprintf(timeStr, sizeof(timeStr), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    tft_.setTextColor(kColorTime, kColorBg);
+    tft_.setFreeFont(&FreeSansBold24pt7b);
+    int timeWidth = tft_.textWidth(timeStr);
+    tft_.drawString(timeStr, (kScreenWidth - timeWidth) / 2, kTimeY);
 
-  char timeStr[6];
-  snprintf(timeStr, sizeof(timeStr), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-  tft_.setTextColor(kColorTime, kColorBg);
-  tft_.setFreeFont(&FreeSansBold24pt7b);
-  int timeWidth = tft_.textWidth(timeStr);
-  tft_.drawString(timeStr, (kScreenWidth - timeWidth) / 2, kTimeY);
+    char dateStr[32];
+    snprintf(dateStr, sizeof(dateStr), "%s, %d %s %d",
+             kDayNames[timeinfo.tm_wday], timeinfo.tm_mday,
+             kMonthNames[timeinfo.tm_mon], timeinfo.tm_year + 1900);
+    tft_.setTextColor(kColorDate, kColorBg);
+    tft_.setFreeFont(&FreeSans9pt7b);
+    tft_.drawString(dateStr, (kScreenWidth - tft_.textWidth(dateStr)) / 2, kDateY);
+  }
 
   char secStr[3];
   snprintf(secStr, sizeof(secStr), "%02d", timeinfo.tm_sec);
+  tft_.fillRect(kSecondsBoxX, kSecondsBoxY, kSecondsBoxW, kSecondsBoxH, kColorBg);
   tft_.setTextColor(kColorSeconds, kColorBg);
   tft_.setFreeFont(&FreeSans12pt7b);
   tft_.drawString(secStr, kSecX, kTimeY + 10);
-
-  char dateStr[32];
-  snprintf(dateStr, sizeof(dateStr), "%s, %d %s %d",
-           kDayNames[timeinfo.tm_wday], timeinfo.tm_mday,
-           kMonthNames[timeinfo.tm_mon], timeinfo.tm_year + 1900);
-  tft_.setTextColor(kColorDate, kColorBg);
-  tft_.setFreeFont(&FreeSans9pt7b);
-  tft_.drawString(dateStr, (kScreenWidth - tft_.textWidth(dateStr)) / 2, kDateY);
 }
 
 // ── Message Overlay ──────────────────────────────────────────────────────────
@@ -377,7 +346,22 @@ void DisplayManager::renderAlarmRinging() {
     tft_.drawString(storedAlarmLabel_, 60, 100);
   }
   tft_.setFreeFont(&FreeSans12pt7b);
-  tft_.drawString("[Dismiss]  [Snooze]", 40, 150);
+  tft_.drawString("Tap anywhere to dismiss", 20, 150);
+}
+
+bool DisplayManager::handleAlarmTouch() {
+  if (!touch_.tirqTouched() && !touch_.touched()) return false;
+  if (!touch_.touched()) return false;
+
+  stopAlarm(AlarmStopReason::kDismiss);
+
+  // Wait briefly for release so one press does not retrigger across frames.
+  vTaskDelay(pdMS_TO_TICKS(50));
+  unsigned long releaseTimeout = millis() + 5000;
+  while (touch_.touched() && millis() < releaseTimeout) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  return true;
 }
 
 // ── Command Queue ────────────────────────────────────────────────────────────
@@ -456,9 +440,9 @@ void DisplayManager::sendDisplayState() {
 void DisplayManager::sendAlarmState(bool armed) {
   EventMessage evt = {};
   evt.type = EventMessage::Type::kAlarmState;
-  evt.state.alarmArmed = armed;
-  evt.alarm.alarmTimeUtc = static_cast<int64_t>(storedAlarmTime_);
-  strncpy(evt.alarm.alarmLabel, storedAlarmLabel_, sizeof(evt.alarm.alarmLabel) - 1);
+  evt.alarmState.armed = armed;
+  evt.alarmState.alarmTimeUtc = static_cast<int64_t>(storedAlarmTime_);
+  strncpy(evt.alarmState.alarmLabel, storedAlarmLabel_, sizeof(evt.alarmState.alarmLabel) - 1);
   xQueueSend(eventQueue, &evt, 0);
 }
 
