@@ -3,3 +3,5 @@
 include/credentials.h
 clock-server/.env
 
+.bmad-loop/runs/
+.bmad-loop/cache/
