@@ -47,6 +47,7 @@ private:
   void showMessage(const char* msg, unsigned long durationMs);
   void renderAlarmRinging();
   void drawCentered(const char* text, int y, uint16_t color, uint16_t bgColor);
+  void drawWrapped(const char* text, uint16_t color, uint16_t bgColor);
   int lastMinute_;
   int lastSecond_;
 

@@ -1,5 +1,6 @@
 #include "display_task.h"
 #include <Arduino.h>
+#include <string.h>
 #include <Preferences.h>
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
@@ -331,6 +332,58 @@ void DisplayManager::drawCentered(const char* text, int y, uint16_t color, uint1
   tft_.drawString(text, x, y);
 }
 
+// Word-wraps text into lines that fit within the screen (minus side margins),
+// then draws the resulting block centered both horizontally and vertically.
+// The font must already be set via setFreeFont() before calling.
+void DisplayManager::drawWrapped(const char* text, uint16_t color, uint16_t bgColor) {
+  constexpr int kMarginX  = 10;
+  constexpr int kMaxLines = 6;
+  constexpr int kLineLen  = 48;
+  const int maxWidth = kScreenWidth - 2 * kMarginX;
+
+  char buf[160];
+  strncpy(buf, text, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+
+  char lines[kMaxLines][kLineLen];
+  int lineCount = 0;
+  char current[kLineLen] = "";
+
+  char* word = strtok(buf, " ");
+  while (word != nullptr && lineCount < kMaxLines) {
+    char candidate[kLineLen];
+    if (current[0] == '\0') {
+      strncpy(candidate, word, sizeof(candidate) - 1);
+      candidate[sizeof(candidate) - 1] = '\0';
+    } else {
+      snprintf(candidate, sizeof(candidate), "%s %s", current, word);
+    }
+
+    if (current[0] == '\0' || tft_.textWidth(candidate) <= maxWidth) {
+      strncpy(current, candidate, sizeof(current) - 1);
+      current[sizeof(current) - 1] = '\0';
+    } else {
+      strncpy(lines[lineCount++], current, kLineLen - 1);
+      lines[lineCount - 1][kLineLen - 1] = '\0';
+      strncpy(current, word, sizeof(current) - 1);
+      current[sizeof(current) - 1] = '\0';
+    }
+    word = strtok(nullptr, " ");
+  }
+  if (current[0] != '\0' && lineCount < kMaxLines) {
+    strncpy(lines[lineCount++], current, kLineLen - 1);
+    lines[lineCount - 1][kLineLen - 1] = '\0';
+  }
+
+  int lineHeight = tft_.fontHeight() + 4;
+  int startY = (kScreenHeight - lineCount * lineHeight) / 2;
+  if (startY < 0) startY = 0;
+
+  for (int i = 0; i < lineCount; i++) {
+    drawCentered(lines[i], startY + i * lineHeight, color, bgColor);
+  }
+}
+
 // ── Message Overlay ──────────────────────────────────────────────────────────
 
 void DisplayManager::showMessage(const char* msg, unsigned long durationMs) {
@@ -342,8 +395,7 @@ void DisplayManager::showMessage(const char* msg, unsigned long durationMs) {
 
   tft_.fillScreen(kColorBg);
   tft_.setFreeFont(kFontDetail);
-  tft_.setTextWrap(true);
-  drawCentered(overlayMessage_, kHeadlineY, kColorMessage, kColorBg);
+  drawWrapped(overlayMessage_, kColorMessage, kColorBg);
 }
 
 // ── Alarm Ringing ────────────────────────────────────────────────────────────
