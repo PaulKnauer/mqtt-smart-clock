@@ -14,10 +14,13 @@ DisplayManager* DisplayManager::instance = nullptr;
 constexpr int kScreenWidth  = 320;
 constexpr int kScreenHeight = 240;
 
-constexpr int kTimeY   = 80;
+// Shared vertical rhythm: every screen (clock, alarm, message) anchors its
+// text to these same three bands so switching modes doesn't shift content.
+constexpr int kHeadlineY = 80;   // hero line: time / "ALARM!" / message body
+constexpr int kBodyY     = 140;  // secondary line: date / alarm label
+constexpr int kFooterY   = 190;  // tertiary line: dismiss hint / footer
+
 constexpr int kSecX    = 220;
-constexpr int kDateY   = 140;
-constexpr int kMsgY    = 100;
 constexpr int kSecondsBoxX = 223;
 constexpr int kSecondsBoxY = 65;
 constexpr int kSecondsBoxW = 64;
@@ -293,18 +296,15 @@ void DisplayManager::renderClockFace() {
 
     char timeStr[6];
     snprintf(timeStr, sizeof(timeStr), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-    tft_.setTextColor(kColorTime, kColorBg);
     tft_.setFreeFont(&FreeSansBold24pt7b);
-    int timeWidth = tft_.textWidth(timeStr);
-    tft_.drawString(timeStr, (kScreenWidth - timeWidth) / 2, kTimeY);
+    drawCentered(timeStr, kHeadlineY, kColorTime, kColorBg);
 
     char dateStr[32];
     snprintf(dateStr, sizeof(dateStr), "%s, %d %s %d",
              kDayNames[timeinfo.tm_wday], timeinfo.tm_mday,
              kMonthNames[timeinfo.tm_mon], timeinfo.tm_year + 1900);
-    tft_.setTextColor(kColorDate, kColorBg);
     tft_.setFreeFont(&FreeSans9pt7b);
-    tft_.drawString(dateStr, (kScreenWidth - tft_.textWidth(dateStr)) / 2, kDateY);
+    drawCentered(dateStr, kBodyY, kColorDate, kColorBg);
   }
 
   char secStr[3];
@@ -312,7 +312,15 @@ void DisplayManager::renderClockFace() {
   tft_.fillRect(kSecondsBoxX, kSecondsBoxY, kSecondsBoxW, kSecondsBoxH, kColorBg);
   tft_.setTextColor(kColorSeconds, kColorBg);
   tft_.setFreeFont(&FreeSans12pt7b);
-  tft_.drawString(secStr, kSecX, kTimeY + 10);
+  tft_.drawString(secStr, kSecX, kHeadlineY + 10);
+}
+
+// ── Layout Helper ────────────────────────────────────────────────────────────
+
+void DisplayManager::drawCentered(const char* text, int y, uint16_t color, uint16_t bgColor) {
+  tft_.setTextColor(color, bgColor);
+  int width = tft_.textWidth(text);
+  tft_.drawString(text, (kScreenWidth - width) / 2, y);
 }
 
 // ── Message Overlay ──────────────────────────────────────────────────────────
@@ -325,10 +333,9 @@ void DisplayManager::showMessage(const char* msg, unsigned long durationMs) {
   currentMode_ = DisplayMode::kMessage;
 
   tft_.fillScreen(kColorBg);
-  tft_.setTextColor(kColorMessage, kColorBg);
   tft_.setFreeFont(&FreeSans12pt7b);
   tft_.setTextWrap(true);
-  tft_.drawString(overlayMessage_, 10, kMsgY);
+  drawCentered(overlayMessage_, kHeadlineY, kColorMessage, kColorBg);
 }
 
 // ── Alarm Ringing ────────────────────────────────────────────────────────────
@@ -338,15 +345,17 @@ void DisplayManager::renderAlarmRinging() {
   toggle = !toggle;
   uint16_t flashColor = toggle ? kColorAlarm : kColorBg;
   tft_.fillScreen(flashColor);
-  tft_.setTextColor(TFT_WHITE, flashColor);
+
   tft_.setFreeFont(&FreeSans18pt7b);
-  tft_.drawString("ALARM!", 60, 60);
+  drawCentered("ALARM!", kHeadlineY, TFT_WHITE, flashColor);
+
   if (strlen(storedAlarmLabel_) > 0) {
     tft_.setFreeFont(&FreeSans9pt7b);
-    tft_.drawString(storedAlarmLabel_, 60, 100);
+    drawCentered(storedAlarmLabel_, kBodyY, TFT_WHITE, flashColor);
   }
+
   tft_.setFreeFont(&FreeSans12pt7b);
-  tft_.drawString("Tap anywhere to dismiss", 20, 150);
+  drawCentered("Tap anywhere to dismiss", kFooterY, TFT_WHITE, flashColor);
 }
 
 bool DisplayManager::handleAlarmTouch() {
