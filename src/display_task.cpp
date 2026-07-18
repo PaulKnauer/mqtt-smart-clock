@@ -326,7 +326,9 @@ void DisplayManager::renderClockFace() {
 void DisplayManager::drawCentered(const char* text, int y, uint16_t color, uint16_t bgColor) {
   tft_.setTextColor(color, bgColor);
   int width = tft_.textWidth(text);
-  tft_.drawString(text, (kScreenWidth - width) / 2, y);
+  int x = (kScreenWidth - width) / 2;
+  if (x < 0) x = 0;  // overwide text: start at the left edge instead of clipping its start off-screen
+  tft_.drawString(text, x, y);
 }
 
 // ── Message Overlay ──────────────────────────────────────────────────────────
