@@ -26,6 +26,12 @@ constexpr int kSecondsBoxY = 65;
 constexpr int kSecondsBoxW = 64;
 constexpr int kSecondsBoxH = 42;
 
+// Shared font hierarchy: every screen picks from the same three roles so
+// text weight/size means the same thing regardless of which mode drew it.
+const GFXfont* kFontHero   = &FreeSansBold24pt7b; // primary line: time, "ALARM!"
+const GFXfont* kFontBody   = &FreeSans9pt7b;       // secondary line: date, alarm label
+const GFXfont* kFontDetail = &FreeSans12pt7b;      // tertiary line: seconds, dismiss hint, message text
+
 constexpr uint16_t kColorBg       = TFT_BLACK;
 constexpr uint16_t kColorTime     = TFT_WHITE;
 constexpr uint16_t kColorSeconds  = TFT_SKYBLUE;
@@ -296,14 +302,14 @@ void DisplayManager::renderClockFace() {
 
     char timeStr[6];
     snprintf(timeStr, sizeof(timeStr), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
-    tft_.setFreeFont(&FreeSansBold24pt7b);
+    tft_.setFreeFont(kFontHero);
     drawCentered(timeStr, kHeadlineY, kColorTime, kColorBg);
 
     char dateStr[32];
     snprintf(dateStr, sizeof(dateStr), "%s, %d %s %d",
              kDayNames[timeinfo.tm_wday], timeinfo.tm_mday,
              kMonthNames[timeinfo.tm_mon], timeinfo.tm_year + 1900);
-    tft_.setFreeFont(&FreeSans9pt7b);
+    tft_.setFreeFont(kFontBody);
     drawCentered(dateStr, kBodyY, kColorDate, kColorBg);
   }
 
@@ -311,7 +317,7 @@ void DisplayManager::renderClockFace() {
   snprintf(secStr, sizeof(secStr), "%02d", timeinfo.tm_sec);
   tft_.fillRect(kSecondsBoxX, kSecondsBoxY, kSecondsBoxW, kSecondsBoxH, kColorBg);
   tft_.setTextColor(kColorSeconds, kColorBg);
-  tft_.setFreeFont(&FreeSans12pt7b);
+  tft_.setFreeFont(kFontDetail);
   tft_.drawString(secStr, kSecX, kHeadlineY + 10);
 }
 
@@ -333,7 +339,7 @@ void DisplayManager::showMessage(const char* msg, unsigned long durationMs) {
   currentMode_ = DisplayMode::kMessage;
 
   tft_.fillScreen(kColorBg);
-  tft_.setFreeFont(&FreeSans12pt7b);
+  tft_.setFreeFont(kFontDetail);
   tft_.setTextWrap(true);
   drawCentered(overlayMessage_, kHeadlineY, kColorMessage, kColorBg);
 }
@@ -346,15 +352,15 @@ void DisplayManager::renderAlarmRinging() {
   uint16_t flashColor = toggle ? kColorAlarm : kColorBg;
   tft_.fillScreen(flashColor);
 
-  tft_.setFreeFont(&FreeSans18pt7b);
+  tft_.setFreeFont(kFontHero);
   drawCentered("ALARM!", kHeadlineY, TFT_WHITE, flashColor);
 
   if (strlen(storedAlarmLabel_) > 0) {
-    tft_.setFreeFont(&FreeSans9pt7b);
+    tft_.setFreeFont(kFontBody);
     drawCentered(storedAlarmLabel_, kBodyY, TFT_WHITE, flashColor);
   }
 
-  tft_.setFreeFont(&FreeSans12pt7b);
+  tft_.setFreeFont(kFontDetail);
   drawCentered("Tap anywhere to dismiss", kFooterY, TFT_WHITE, flashColor);
 }
 
